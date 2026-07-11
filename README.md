@@ -1,5 +1,8 @@
 # MicroChunk
 
+<img width="1875" height="842" alt="microChunk - README Picture" src="https://github.com/user-attachments/assets/da74a669-d60b-4371-ba8c-d5b39311bc2b" />
+
+
 Turns a PDF or YouTube video into fixed-length, sentence-clean "study cards."
 No paid AI APIs anywhere — PDF text extraction and YouTube captions are both
 pulled and processed locally/on your own server.
