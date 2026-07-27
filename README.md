@@ -5,7 +5,7 @@
 
 Turns a PDF or YouTube video into fixed-length, sentence-clean "study cards."
 No paid AI APIs anywhere — PDF text extraction and YouTube captions are both
-pulled and processed locally/on your own server.
+pulled and processed locally/on the server (once hosted. I got sick recently).
 
 ```
 microchunk/
