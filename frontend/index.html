@@ -18,7 +18,10 @@
     <span class="brand-mark">§</span>
     <span class="brand-name">MicroChunk</span>
   </div>
-  <span class="tag">no cloud AI · runs the parsing locally</span>
+  <div class="header-right">
+    <span class="badge" id="streak-badge" title="Consecutive days used"><span class="flame">🔥</span> <span id="streak-count">0</span> day streak</span>
+    <span class="badge mono" id="usage-badge" title="Free chunk jobs left today">-- left today</span>
+  </div>
 </header>
 
 <main>
@@ -39,8 +42,9 @@
           <input type="file" id="pdf-input" accept="application/pdf" hidden>
           <span class="dz-icon">⤓</span>
           <span class="dz-title" id="dz-title">Drop a PDF here, or click to browse</span>
-          <span class="dz-sub">Text-layer PDFs only — up to 50MB, processed on our server, never sent to a model.</span>
+          <span class="dz-sub">Text-layer PDFs only — up to 10MB, processed on our server, never sent to a model.</span>
         </label>
+        <button class="go-btn pdf-start-btn" id="pdf-start-btn" hidden>▸ Start chunking</button>
       </div>
 
       <div class="intake-panel" id="panel-youtube">
@@ -56,9 +60,19 @@
         <input type="range" id="words-per-chunk" min="50" max="300" value="130" step="10">
         <span id="words-per-chunk-val" class="mono">130</span>
       </div>
+      <div class="controls" id="strategy-row">
+        <label for="strategy-select">Chunking</label>
+        <select id="strategy-select">
+          <option value="fixed" selected>Fixed-size (fast)</option>
+          <option value="semantic">Semantic (topic-aware, PDF only)</option>
+        </select>
+      </div>
     </div>
 
     <div id="status" class="status"></div>
+    <div class="progress-track" id="progress-track" hidden>
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
   </section>
 
   <section class="deck-section" id="deck-section" hidden>
@@ -66,10 +80,38 @@
       <p class="eyebrow" id="deck-eyebrow">Catalog No. 02 — Deck</p>
       <h2 id="deck-title">Your deck</h2>
       <div class="deck-meta mono" id="deck-meta"></div>
+      <button class="study-btn" id="study-btn">▸ Study this deck</button>
     </div>
     <div class="deck" id="deck"></div>
   </section>
 </main>
+
+<!-- Study Mode overlay: active recall flashcard review -->
+<div class="study-overlay" id="study-overlay" hidden>
+  <div class="study-topbar">
+    <button class="study-exit" id="study-exit">✕ Exit</button>
+    <div class="study-progress-track">
+      <div class="study-progress-fill" id="study-progress-fill"></div>
+    </div>
+    <span class="mono study-count" id="study-count">0 / 0</span>
+  </div>
+  <div class="study-stage">
+    <div class="study-card" id="study-card">
+      <div class="study-card-index mono" id="study-card-index">No. 01</div>
+      <div class="study-card-text" id="study-card-text"></div>
+      <div class="study-flip-hint mono">tap card to reveal · or just read it</div>
+    </div>
+  </div>
+  <div class="study-actions">
+    <button class="study-btn-review" id="study-btn-review">↻ Review again</button>
+    <button class="study-btn-known" id="study-btn-known">✓ Got it</button>
+  </div>
+  <div class="study-done" id="study-done" hidden>
+    <p class="study-done-title">Deck cleared 🎉</p>
+    <p class="study-done-sub">Every card marked "Got it." Come back tomorrow for your next one.</p>
+    <button class="go-btn" id="study-restart">Study again</button>
+  </div>
+</div>
 
 <footer>
   <span>MicroChunk — built for skimming less and understanding more.</span>
