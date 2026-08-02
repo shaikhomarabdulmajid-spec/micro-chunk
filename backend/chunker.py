@@ -1,14 +1,20 @@
 """
 Local, API-free text chunking.
 
-Strategy: fixed-size windows, but snapped to sentence boundaries so a chunk
-never cuts a sentence in half. Everything here runs on-device with the
-standard library plus regex - no network calls, no model downloads.
+Two strategies, both sentence-boundary safe:
+  - "fixed"    : fixed word-count windows. Cheap, deterministic, streams
+                 page-by-page for large PDFs so memory stays bounded.
+  - "semantic" : groups sentences by topical similarity using a small local
+                 sentence-embedding model (all-MiniLM-L6-v2, ~90MB, runs on
+                 CPU). Better card boundaries, costs more time/RAM, and
+                 needs the whole document's sentences in memory at once -
+                 so it's opt-in, not the default for huge files.
+
+Nothing here calls out to a network AI API. The "semantic" model is
+downloaded once (on first use) and then runs entirely on your own server.
 """
 import re
 
-# Matches sentence-ending punctuation followed by whitespace + a capital
-# letter / quote / number, while trying not to split on common abbreviations.
 _SENTENCE_SPLIT = re.compile(
     r'(?<!\b[A-Z][a-z]\.)(?<!\bMr\.)(?<!\bMrs\.)(?<!\bDr\.)(?<!\bvs\.)'
     r'(?<=[.!?])\s+(?=[A-Z0-9"\u201c])'
@@ -59,6 +65,128 @@ def _finalize(sentences: list[str], index: int) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Semantic chunking (local embeddings, lazy-loaded so an idle server doesn't
+# pay the RAM cost until someone actually requests strategy="semantic")
+# ---------------------------------------------------------------------------
+_embedder = None
+
+
+def _get_embedder():
+    global _embedder
+    if _embedder is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Semantic chunking needs the optional dependencies in "
+                "requirements-semantic.txt (sentence-transformers + torch). "
+                "Install them, or use strategy='fixed' instead."
+            ) from exc
+        _embedder = SentenceTransformer("all-MiniLM-L6-v2")  # ~90MB, CPU-friendly
+    return _embedder
+
+
+def semantic_chunk_text(
+    text: str,
+    max_words: int = DEFAULT_WORDS_PER_CHUNK,
+    similarity_threshold: float = 0.55,
+    on_progress=None,
+) -> list[dict]:
+    """
+    Group consecutive sentences by embedding similarity instead of raw word
+    count. A chunk breaks when either (a) the topic visibly shifts (cosine
+    similarity between neighboring sentences drops below the threshold) or
+    (b) it would exceed max_words - the size cap is a guardrail, not the
+    primary signal.
+
+    on_progress(done_batches, total_batches), if given, is called after each
+    embedding batch - this is what lets the API report real progress during
+    the slowest part of semantic mode instead of just sitting at one state.
+    """
+    sentences = split_sentences(text)
+    if len(sentences) <= 1:
+        return chunk_text(text, max_words)
+
+    model = _get_embedder()
+    batch_size = 32
+    total_batches = max(1, (len(sentences) + batch_size - 1) // batch_size)
+    embeddings = []
+    for i in range(0, len(sentences), batch_size):
+        batch = sentences[i:i + batch_size]
+        embeddings.extend(model.encode(batch, normalize_embeddings=True, show_progress_bar=False))
+        if on_progress:
+            on_progress(i // batch_size + 1, total_batches)
+
+    chunks = []
+    current = [sentences[0]]
+    current_words = len(sentences[0].split())
+
+    for i in range(1, len(sentences)):
+        similarity = float(embeddings[i - 1] @ embeddings[i])  # normalized -> cosine sim
+        sentence_words = len(sentences[i].split())
+        topic_shift = similarity < similarity_threshold
+        would_overflow = current_words + sentence_words > max_words
+
+        if (topic_shift and current_words >= MIN_WORDS_PER_CHUNK) or would_overflow:
+            chunks.append(_finalize(current, len(chunks)))
+            current, current_words = [], 0
+
+        current.append(sentences[i])
+        current_words += sentence_words
+
+    if current:
+        chunks.append(_finalize(current, len(chunks)))
+
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Memory-bounded streaming chunking for large PDFs
+# ---------------------------------------------------------------------------
+def chunk_pages_streaming(pages, words_per_chunk: int = DEFAULT_WORDS_PER_CHUNK):
+    """
+    Consume an iterator of per-page text (e.g. pdfplumber's lazy `pdf.pages`)
+    and yield finished chunks as soon as they're ready, instead of joining
+    the entire document into one giant string first. Memory use stays
+    proportional to one chunk's worth of text, not the whole PDF -
+    a 900-page book costs the same RAM here as a 9-page handout.
+    """
+    buffer: list[str] = []
+    buffer_words = 0
+    index = 0
+    carry = ""
+
+    for page_text in pages:
+        page_text = (carry + " " + page_text).strip() if carry else page_text.strip()
+        if not page_text:
+            continue
+
+        sentences = split_sentences(page_text)
+        if not sentences:
+            continue
+
+        if not re.search(r'[.!?"\u201d]$', page_text):
+            carry = sentences.pop()
+        else:
+            carry = ""
+
+        for sentence in sentences:
+            words = len(sentence.split())
+            if buffer_words + words > words_per_chunk and buffer_words >= MIN_WORDS_PER_CHUNK:
+                yield _finalize(buffer, index)
+                index += 1
+                buffer, buffer_words = [], 0
+            buffer.append(sentence)
+            buffer_words += words
+
+    if carry:
+        buffer.append(carry)
+        buffer_words += len(carry.split())
+    if buffer:
+        yield _finalize(buffer, index)
+
+
 def chunk_transcript(segments: list[dict], words_per_chunk: int = DEFAULT_WORDS_PER_CHUNK) -> list[dict]:
     """
     Chunk a YouTube transcript (list of {text, start, duration} segments from
@@ -66,7 +194,7 @@ def chunk_transcript(segments: list[dict], words_per_chunk: int = DEFAULT_WORDS_
     timestamps for each chunk so the UI can deep-link into the video.
     """
     full_text_parts = []
-    boundaries = []  # (char_start, char_end, timestamp_start)
+    boundaries = []
     cursor = 0
 
     for seg in segments:
