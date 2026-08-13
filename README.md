@@ -55,7 +55,7 @@ the cards by hand.
    (SM-2, the same scheduling Anki runs on), so a card you know well
    shows up again in a week instead of every single day.
 
-## What technologies did you use?
+## What technologies did I use?
 
 - Backend: Python, FastAPI, PyMuPDF for PDF text extraction,
   `youtube-transcript-api` for captions, and optionally
