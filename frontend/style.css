@@ -82,9 +82,34 @@ a{ color: var(--teal-deep); }
 @media (max-width: 640px){ .badge{ font-size: 11px; padding: 5px 10px; } }
 
 /* ---------- Hero ---------- */
-main{ position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 0 clamp(20px, 5vw, 64px) 80px; }
+main{ position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 0 clamp(20px, 5vw, 64px) 80px; }
 
 .hero{ padding-top: clamp(40px, 8vh, 88px); }
+
+.your-decks{ margin-top: 56px; }
+.your-decks-title{ font-family: var(--serif); font-size: 22px; margin: 0 0 18px; }
+.deck-list{ display: flex; flex-direction: column; gap: 10px; }
+.deck-list-item{
+  display: flex; align-items: center; gap: 14px;
+  border: 1px solid var(--rule); border-radius: 6px; background: var(--card);
+  padding: 14px 16px;
+}
+.deck-list-info{ flex: 1; min-width: 0; }
+.deck-list-title{ font-weight: 600; font-size: 14.5px; margin: 0 0 3px; }
+.deck-list-meta{ font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft); }
+.deck-list-due{
+  font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--teal-deep);
+  border: 1px solid var(--teal-deep); border-radius: 999px; padding: 4px 11px; white-space: nowrap;
+}
+.deck-list-due.none{ color: var(--ink-soft); border-color: var(--rule); }
+.deck-list-open, .deck-list-delete{
+  border: none; background: none; cursor: pointer; font-family: var(--sans);
+  font-size: 12.5px; padding: 6px 10px; border-radius: 4px;
+}
+.deck-list-open{ background: var(--ink); color: var(--paper); font-weight: 600; }
+.deck-list-open:hover{ background: var(--teal-deep); }
+.deck-list-delete{ color: var(--ink-soft); }
+.deck-list-delete:hover{ color: var(--danger); }
 
 .eyebrow{
   font-family: var(--mono); font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase;
@@ -180,10 +205,16 @@ h1{
 .progress-track{
   margin-top: 10px; height: 6px; border-radius: 4px; overflow: hidden;
   background: var(--paper-deep);
+  position: relative;
 }
-.progress-fill{
-  height: 100%; width: 0%; background: var(--teal-deep); border-radius: 4px;
-  transition: width .2s ease;
+.progress-track.indeterminate .progress-fill{
+  position: absolute; top:0; bottom:0; width: 40%; border-radius: 4px;
+  background: var(--teal-deep);
+  animation: indeterminate-slide 1.1s ease-in-out infinite;
+}
+@keyframes indeterminate-slide{
+  0%   { left: -40%; }
+  100% { left: 100%; }
 }
 
 .pdf-start-btn{
@@ -211,15 +242,79 @@ h1{
 .study-btn:hover{ background: var(--teal-deep); }
 .study-btn:active{ transform: scale(0.97); }
 
-.deck{ display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 18px; }
+.deck-layout{ display: grid; grid-template-columns: 220px 1fr; gap: 32px; align-items: start; }
+@media (max-width: 780px){ .deck-layout{ grid-template-columns: 1fr; } }
+
+.topic-sidebar{
+  position: sticky; top: 20px;
+  border: 1px solid var(--rule); border-radius: 6px; background: var(--card);
+  padding: 16px 14px;
+  max-height: 70vh; overflow-y: auto;
+}
+.topic-sidebar-label{
+  display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ink-soft); margin-bottom: 10px;
+}
+.topic-nav-list{ list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.topic-nav-list a{
+  display: block; padding: 7px 8px; border-radius: 4px;
+  font-size: 13px; line-height: 1.35; color: var(--ink-soft); text-decoration: none;
+  transition: background .15s ease, color .15s ease;
+}
+.topic-nav-list a:hover{ background: var(--paper-deep); color: var(--ink); }
+.topic-nav-list a.active{ background: var(--ink); color: var(--paper); }
+
+.deck{ display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+.fallback-note{
+  font-family: var(--mono); font-size: 12.5px; color: var(--ink-soft);
+  background: var(--paper-deep); border-radius: 4px; padding: 10px 14px;
+  border-left: 3px solid var(--teal-deep);
+}
+
+.topic-section{
+  border: 1px solid var(--rule); border-radius: 6px; background: var(--card);
+  overflow: hidden;
+}
+
+.topic-toggle{
+  width: 100%; display: flex; align-items: center; gap: 12px;
+  background: none; border: none; cursor: pointer; text-align: left;
+  padding: 16px 18px; font-family: var(--sans);
+}
+.topic-toggle:hover{ background: var(--paper-deep); }
+.topic-title{
+  font-family: var(--serif); font-weight: 600; font-size: 16.5px; color: var(--ink);
+  flex: 1; min-width: 0;
+}
+.topic-count{ font-family: var(--mono); font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+.topic-chevron{
+  font-size: 13px; color: var(--teal-deep); transition: transform .2s ease; flex-shrink: 0;
+}
+.topic-toggle[aria-expanded="true"] .topic-chevron{ transform: rotate(180deg); }
+
+.topic-cards-row[hidden]{ display: none; }
+.topic-cards-row{
+  border-top: 1px solid var(--rule);
+  padding: 16px 18px 18px;
+}
+.topic-cards-track{
+  display: flex; flex-direction: row; gap: 16px;
+  overflow-x: auto; padding-bottom: 6px;
+  scroll-snap-type: x proximity;
+}
+.topic-cards-track::-webkit-scrollbar{ height: 7px; }
+.topic-cards-track::-webkit-scrollbar-thumb{ background: var(--rule); border-radius: 4px; }
 
 .card{
   position: relative;
-  background: var(--card);
+  flex: 0 0 300px;
+  scroll-snap-align: start;
+  background: var(--paper);
   border: 1px solid var(--rule);
   border-radius: 4px;
-  padding: 22px 18px 18px;
-  min-height: 200px;
+  padding: 18px 18px 14px;
+  min-height: 150px;
   display:flex; flex-direction: column;
   animation: rise .38s ease both;
   transition: transform .15s ease, box-shadow .15s ease;
@@ -234,23 +329,6 @@ h1{
   to{ opacity: 1; transform: translateY(0); }
 }
 
-/* perforated / punch-card top edge */
-.card::before{
-  content:'';
-  position:absolute; top:0; left:16px; right:16px; height:1px;
-  background-image: radial-gradient(circle, var(--paper-deep) 1.4px, transparent 1.5px);
-  background-size: 10px 1px;
-  background-repeat: repeat-x;
-}
-.card::after{
-  content:'';
-  position:absolute; top:-5px; left:14px; width:9px; height:9px; border-radius:50%;
-  background: var(--paper);
-  box-shadow: calc(100% - 20px + 8px) 0 0 var(--paper);
-  border: 1px solid var(--rule);
-}
-
-.card-index{ font-family: var(--mono); font-size: 12px; color: var(--teal-deep); margin-bottom: 10px; }
 .card-text{ font-size: 14.5px; line-height: 1.55; flex: 1; }
 .card-text mark{
   background: linear-gradient(120deg, var(--highlighter) 0%, var(--highlighter) 100%);
