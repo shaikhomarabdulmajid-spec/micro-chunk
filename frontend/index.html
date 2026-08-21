@@ -57,14 +57,14 @@
 
       <div class="controls">
         <label for="words-per-chunk">Words per card</label>
-        <input type="range" id="words-per-chunk" min="50" max="300" value="130" step="10">
-        <span id="words-per-chunk-val" class="mono">130</span>
+        <input type="range" id="words-per-chunk" min="40" max="150" value="90" step="10">
+        <span id="words-per-chunk-val" class="mono">90</span>
       </div>
       <div class="controls" id="strategy-row">
         <label for="strategy-select">Chunking</label>
         <select id="strategy-select">
-          <option value="fixed" selected>Fixed-size (fast)</option>
-          <option value="semantic">Semantic (topic-aware, PDF only)</option>
+          <option value="semantic" id="semantic-option" selected>Smart grouping (topic-aware)</option>
+          <option value="fixed">Structural (fast, unlimited)</option>
         </select>
       </div>
     </div>
@@ -75,14 +75,26 @@
     </div>
   </section>
 
+  <section class="your-decks" id="your-decks" hidden>
+    <p class="eyebrow">Catalog No. 02 — Your Decks</p>
+    <h2 class="your-decks-title">Pick up where you left off</h2>
+    <div class="deck-list" id="deck-list"></div>
+  </section>
+
   <section class="deck-section" id="deck-section" hidden>
     <div class="deck-header">
-      <p class="eyebrow" id="deck-eyebrow">Catalog No. 02 — Deck</p>
+      <p class="eyebrow" id="deck-eyebrow">Catalog No. 03 — Deck</p>
       <h2 id="deck-title">Your deck</h2>
       <div class="deck-meta mono" id="deck-meta"></div>
       <button class="study-btn" id="study-btn">▸ Study this deck</button>
     </div>
-    <div class="deck" id="deck"></div>
+    <div class="deck-layout">
+      <nav class="topic-sidebar" id="topic-sidebar">
+        <span class="topic-sidebar-label mono">Topics</span>
+        <ul class="topic-nav-list" id="topic-nav-list"></ul>
+      </nav>
+      <div class="deck" id="deck"></div>
+    </div>
   </section>
 </main>
 
