@@ -1,13 +1,10 @@
 import os
 import re
-import threading
-import time
-import uuid
 from collections import defaultdict
 from datetime import date
 
 import fitz  # PyMuPDF
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -15,8 +12,8 @@ from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFoun
 
 from chunker import (
     chunk_transcript,
-    chunk_pages_streaming,
-    semantic_chunk_text,
+    chunk_sections,
+    semantic_chunk_sections,
     DEFAULT_WORDS_PER_CHUNK,
 )
 
@@ -41,6 +38,16 @@ DAILY_MB_LIMIT = float(os.environ.get("DAILY_MB_LIMIT", 40))
 # just to bound request *frequency*, not because they cost 1MB of real work.
 YOUTUBE_JOB_COST_MB = float(os.environ.get("YOUTUBE_JOB_COST_MB", 1.0))
 
+# Both chunking strategies get their own daily cap, checked independently -
+# 1 free use each per day, by default. Not tied to any paid-tier system
+# (there isn't one yet) - purely a cost/abuse guardrail while this runs on
+# free hosting. Override via env vars for local development, where hitting
+# a wall of 1 use per session would make testing painful - e.g. set
+# FIXED_DAILY_LIMIT=999 and SEMANTIC_DAILY_LIMIT=999 in your local .env,
+# and leave the strict defaults for the deployed instance.
+FIXED_DAILY_LIMIT = int(os.environ.get("FIXED_DAILY_LIMIT", 1))
+SEMANTIC_DAILY_LIMIT = int(os.environ.get("SEMANTIC_DAILY_LIMIT", 1))
+
 app = FastAPI(title="MicroChunk API")
 
 app.add_middleware(
@@ -50,33 +57,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_usage: dict[str, dict] = defaultdict(lambda: {"date": None, "used_mb": 0.0})
+_usage: dict[str, dict] = defaultdict(
+    lambda: {"date": None, "used_mb": 0.0, "semantic_count": 0, "fixed_count": 0}
+)
 
 
 def _client_key(request: Request) -> str:
+    # SECURITY: this used to take the FIRST value in X-Forwarded-For, which
+    # is exactly the part a client can set to whatever they want - trivially
+    # defeating the quota by sending a fresh fake value on every request.
+    # A standard reverse proxy (Render's edge, in front of this app) APPENDS
+    # the real connecting IP to the end of the chain rather than replacing
+    # it, so the trustworthy value is the LAST one, not the first. This
+    # assumes exactly one trusted proxy hop in front of the app (true for
+    # Render's default setup) - if you ever add another proxy/CDN layer in
+    # front of Render, this needs revisiting.
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
 def _quota_snapshot(record: dict) -> dict:
-    remaining = max(0.0, DAILY_MB_LIMIT - record["used_mb"])
+    remaining_mb = max(0.0, DAILY_MB_LIMIT - record["used_mb"])
+    remaining_semantic = max(0, SEMANTIC_DAILY_LIMIT - record["semantic_count"])
+    remaining_fixed = max(0, FIXED_DAILY_LIMIT - record["fixed_count"])
     return {
         "used_mb": round(record["used_mb"], 2),
         "limit_mb": DAILY_MB_LIMIT,
-        "remaining_mb": round(remaining, 2),
+        "remaining_mb": round(remaining_mb, 2),
+        "semantic_used": record["semantic_count"],
+        "semantic_limit": SEMANTIC_DAILY_LIMIT,
+        "semantic_remaining": remaining_semantic,
+        "fixed_used": record["fixed_count"],
+        "fixed_limit": FIXED_DAILY_LIMIT,
+        "fixed_remaining": remaining_fixed,
     }
 
 
-def _check_and_charge(request: Request, mb_cost: float) -> dict:
+def _get_today_record(request: Request) -> dict:
     key = _client_key(request)
     today = date.today().isoformat()
     record = _usage[key]
-
     if record["date"] != today:
         record["date"] = today
         record["used_mb"] = 0.0
+        record["semantic_count"] = 0
+        record["fixed_count"] = 0
+    return record
+
+
+def _check_and_charge(request: Request, mb_cost: float) -> dict:
+    record = _get_today_record(request)
 
     if record["used_mb"] + mb_cost > DAILY_MB_LIMIT:
         raise HTTPException(
@@ -89,6 +121,16 @@ def _check_and_charge(request: Request, mb_cost: float) -> dict:
 
     record["used_mb"] += mb_cost
     return _quota_snapshot(record)
+
+
+def _record_semantic_use(request: Request):
+    record = _get_today_record(request)
+    record["semantic_count"] += 1
+
+
+def _record_fixed_use(request: Request):
+    record = _get_today_record(request)
+    record["fixed_count"] += 1
 
 
 class YouTubeRequest(BaseModel):
@@ -115,97 +157,17 @@ def health():
 
 @app.get("/api/usage")
 def usage(request: Request):
-    """Lets the frontend show 'X MB left today' without spending any."""
+    """Lets the frontend show remaining MB and per-strategy uses without spending any."""
     key = _client_key(request)
     today = date.today().isoformat()
     record = _usage[key]
-    used_mb = record["used_mb"] if record["date"] == today else 0.0
-    return _quota_snapshot({"used_mb": used_mb})
+    if record["date"] != today:
+        return _quota_snapshot({"used_mb": 0.0, "semantic_count": 0, "fixed_count": 0})
+    return _quota_snapshot(record)
 
 
-# ---------------------------------------------------------------------------
-# PDF jobs: background thread + polling, so the frontend can show REAL
-# per-page progress instead of a spinner that just sits there. PyMuPDF and
-# the (optional) embedding model are both synchronous/CPU-bound, so this
-# work runs in a plain thread rather than blocking the async event loop -
-# that keeps /api/usage and other requests responsive while a big PDF is
-# being chunked.
-#
-# _jobs is a simple in-memory dict, pruned of anything older than 15
-# minutes on every new job creation. No database, no queue - proportional
-# to what this app actually needs.
-# ---------------------------------------------------------------------------
-_jobs: dict[str, dict] = {}
-_JOB_TTL_SECONDS = 15 * 60
-
-
-def _prune_old_jobs():
-    cutoff = time.time() - _JOB_TTL_SECONDS
-    stale = [jid for jid, job in _jobs.items() if job["created_at"] < cutoff]
-    for jid in stale:
-        _jobs.pop(jid, None)
-
-
-def _run_pdf_job(job_id: str, raw: bytes, words_per_chunk: int, strategy: str):
-    job = _jobs[job_id]
-    try:
-        with fitz.open(stream=raw, filetype="pdf") as pdf:
-            page_count = pdf.page_count
-            job["total_pages"] = page_count
-
-            if strategy == "semantic":
-                text_parts = []
-                for i, page in enumerate(pdf):
-                    text_parts.append(page.get_text() or "")
-                    # Extraction is the first half of semantic mode's work.
-                    job["phase"] = "reading pages"
-                    job["percent"] = round(((i + 1) / page_count) * 50, 1)
-                full_text = "\n".join(text_parts).strip()
-                if not full_text:
-                    raise ValueError(
-                        "No extractable text found - this PDF may be scanned images without a text layer."
-                    )
-
-                def on_embed_progress(done_batches, total_batches):
-                    job["phase"] = "grouping by topic"
-                    job["percent"] = round(50 + (done_batches / total_batches) * 50, 1)
-
-                chunks = semantic_chunk_text(
-                    full_text, max_words=words_per_chunk, on_progress=on_embed_progress
-                )
-            else:
-                def page_text_iter():
-                    for i, page in enumerate(pdf):
-                        yield page.get_text() or ""
-                        job["phase"] = "chunking"
-                        job["percent"] = round(((i + 1) / page_count) * 100, 1)
-
-                chunks = list(chunk_pages_streaming(page_text_iter(), words_per_chunk=words_per_chunk))
-                if not chunks:
-                    raise ValueError(
-                        "No extractable text found - this PDF may be scanned images without a text layer."
-                    )
-
-        total_words = sum(c["word_count"] for c in chunks)
-        job["status"] = "done"
-        job["percent"] = 100
-        job["result"] = {
-            "source": "pdf",
-            "filename": job["filename"],
-            "strategy": strategy,
-            "page_count": page_count,
-            "total_words": total_words,
-            "chunk_count": len(chunks),
-            "chunks": chunks,
-            "usage": job["usage"],
-        }
-    except Exception as exc:
-        job["status"] = "error"
-        job["error"] = str(exc)
-
-
-@app.post("/api/pdf/start")
-async def start_pdf_job(
+@app.post("/api/pdf")
+async def chunk_pdf(
     request: Request,
     file: UploadFile = File(...),
     words_per_chunk: int = DEFAULT_WORDS_PER_CHUNK,
@@ -223,45 +185,90 @@ async def start_pdf_job(
     mb_cost = len(raw) / (1024 * 1024)
     quota = _check_and_charge(request, mb_cost)
 
-    _prune_old_jobs()
-    job_id = uuid.uuid4().hex
-    _jobs[job_id] = {
-        "status": "processing",
-        "phase": "starting",
-        "percent": 0,
-        "total_pages": None,
+    # Both strategies are capped at their own daily allowance. If the one
+    # requested is spent, try the other before giving up entirely - a demo
+    # should degrade gracefully, not hard-fail just because you already
+    # tried one mode a moment ago. Only errors out if BOTH are spent.
+    today_record = _get_today_record(request)
+    fixed_ok = today_record["fixed_count"] < FIXED_DAILY_LIMIT
+    semantic_ok = today_record["semantic_count"] < SEMANTIC_DAILY_LIMIT
+
+    if strategy == "fixed" and not fixed_ok and semantic_ok:
+        effective_strategy = "semantic"
+    elif strategy == "semantic" and not semantic_ok and fixed_ok:
+        effective_strategy = "fixed"
+    elif (strategy == "fixed" and fixed_ok) or (strategy == "semantic" and semantic_ok):
+        effective_strategy = strategy
+    else:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Today's free chunking uses are spent "
+                f"({FIXED_DAILY_LIMIT} structural + {SEMANTIC_DAILY_LIMIT} semantic). "
+                f"Come back tomorrow!"
+            ),
+        )
+
+    used_semantic = False
+    fallback_reason = None
+    if effective_strategy != strategy:
+        fallback_reason = f"'{strategy}' mode's free use for today is spent - used {effective_strategy} instead."
+
+    try:
+        with fitz.open(stream=raw, filetype="pdf") as pdf:
+            page_count = pdf.page_count
+
+            def page_blocks_iter():
+                for page in pdf:
+                    raw_blocks = page.get_text("blocks")
+                    ordered = sorted(raw_blocks, key=lambda b: (round(b[1] / 5), b[0]))
+                    yield [b[4] for b in ordered if b[6] == 0]
+
+            if effective_strategy == "semantic":
+                try:
+                    chunks = semantic_chunk_sections(page_blocks_iter(), max_words=words_per_chunk)
+                    used_semantic = True
+                except Exception as exc:
+                    # A demo should never just break because the embedding
+                    # model failed to load or run - fall back to the
+                    # reliable structural chunker and say so honestly,
+                    # rather than surfacing a raw error mid-presentation.
+                    fallback_reason = f"semantic chunking failed ({exc}), used structural chunking instead"
+                    chunks = list(chunk_sections(page_blocks_iter(), words_per_chunk=words_per_chunk))
+            else:
+                chunks = list(chunk_sections(page_blocks_iter(), words_per_chunk=words_per_chunk))
+
+            if not chunks:
+                raise HTTPException(
+                    status_code=422,
+                    detail="No extractable text found - this PDF may be scanned images without a text layer.",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Couldn't read that PDF: {exc}")
+
+    # Recorded exactly once, only for the mode that actually ran, and only
+    # on success - a failed attempt shouldn't burn today's one free use.
+    if used_semantic:
+        _record_semantic_use(request)
+    else:
+        _record_fixed_use(request)
+    quota = _quota_snapshot(_get_today_record(request))
+
+    total_words = sum(c["word_count"] for c in chunks)
+    return {
+        "source": "pdf",
         "filename": file.filename,
+        "strategy": "semantic" if used_semantic else "structural",
+        "requested_strategy": strategy,
+        "fallback_reason": fallback_reason,
+        "page_count": page_count,
+        "total_words": total_words,
+        "chunk_count": len(chunks),
+        "chunks": chunks,
         "usage": quota,
-        "created_at": time.time(),
-        "result": None,
-        "error": None,
     }
-
-    thread = threading.Thread(
-        target=_run_pdf_job, args=(job_id, raw, words_per_chunk, strategy), daemon=True
-    )
-    thread.start()
-
-    return {"job_id": job_id, "usage": quota}
-
-
-@app.get("/api/pdf/progress/{job_id}")
-def pdf_progress(job_id: str):
-    job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Unknown or expired job.")
-
-    payload = {
-        "status": job["status"],
-        "phase": job["phase"],
-        "percent": job["percent"],
-        "total_pages": job["total_pages"],
-    }
-    if job["status"] == "done":
-        payload["result"] = job["result"]
-    elif job["status"] == "error":
-        payload["detail"] = job["error"]
-    return payload
 
 
 @app.post("/api/youtube")
