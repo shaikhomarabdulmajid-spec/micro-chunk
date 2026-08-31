@@ -15,7 +15,7 @@
 
 <header class="top">
   <div class="brand">
-    <span class="brand-mark">§</span>
+    <span class="brand-mark">§</span> <!--Remember to change the logo of MicroChunk-->
     <span class="brand-name">MicroChunk</span>
   </div>
   <div class="header-right">
@@ -26,17 +26,11 @@
 
 <main>
   <section class="hero">
-    <p class="eyebrow">Catalog No. 01 — Intake</p>
-    <h1>Feed it a wall of text.<br>Get back a deck you can actually study.</h1>
-    <p class="lede">Drop a PDF or paste a YouTube link. MicroChunk splits it into sentence-clean,
+    <h1>Feed it a wall of text.<br>Get back a deck you can <span class="swipe">actually study</span>.</h1>
+    <p class="lede">Drop a PDF. MicroChunk splits it into sentence-clean,
     fixed-length cards — like flashcards a patient TA made for you at 2am.</p>
 
     <div class="intake">
-      <div class="intake-tabs">
-        <button class="tab active" data-tab="pdf">PDF</button>
-        <button class="tab" data-tab="youtube">YouTube</button>
-      </div>
-
       <div class="intake-panel active" id="panel-pdf">
         <label class="dropzone" id="dropzone" for="pdf-input">
           <input type="file" id="pdf-input" accept="application/pdf" hidden>
@@ -44,15 +38,7 @@
           <span class="dz-title" id="dz-title">Drop a PDF here, or click to browse</span>
           <span class="dz-sub">Text-layer PDFs only — up to 10MB, processed on our server, never sent to a model.</span>
         </label>
-        <button class="go-btn pdf-start-btn" id="pdf-start-btn" hidden>▸ Start chunking</button>
-      </div>
-
-      <div class="intake-panel" id="panel-youtube">
-        <div class="yt-row">
-          <input type="text" id="yt-input" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
-          <button id="yt-submit" class="go-btn">Chunk it</button>
-        </div>
-        <span class="dz-sub">Pulls the video's existing captions — no audio download, no transcription model.</span>
+        <button class="go-btn pdf-start-chunking-btn" id="pdf-start-chunking-btn" hidden>▸ Start chunking</button>
       </div>
 
       <div class="controls">
@@ -63,8 +49,8 @@
       <div class="controls" id="strategy-row">
         <label for="strategy-select">Chunking</label>
         <select id="strategy-select">
-          <option value="semantic" id="semantic-option" selected>Smart grouping (topic-aware)</option>
-          <option value="fixed">Structural (fast, unlimited)</option>
+          <option value="fixed" selected>Structural (fast, unlimited)</option>
+          <option value="semantic" id="semantic-option">Smart grouping (topic-aware)</option>
         </select>
       </div>
     </div>
@@ -76,14 +62,12 @@
   </section>
 
   <section class="your-decks" id="your-decks" hidden>
-    <p class="eyebrow">Catalog No. 02 — Your Decks</p>
     <h2 class="your-decks-title">Pick up where you left off</h2>
     <div class="deck-list" id="deck-list"></div>
   </section>
 
   <section class="deck-section" id="deck-section" hidden>
     <div class="deck-header">
-      <p class="eyebrow" id="deck-eyebrow">Catalog No. 03 — Deck</p>
       <h2 id="deck-title">Your deck</h2>
       <div class="deck-meta mono" id="deck-meta"></div>
       <button class="study-btn" id="study-btn">▸ Study this deck</button>
@@ -106,12 +90,12 @@
       <div class="study-progress-fill" id="study-progress-fill"></div>
     </div>
     <span class="mono study-count" id="study-count">0 / 0</span>
+    <button class="study-not-gotten-tab" id="study-not-gotten-tab" hidden>Not gotten (<span id="not-gotten-count">0</span>)</button>
   </div>
   <div class="study-stage">
     <div class="study-card" id="study-card">
       <div class="study-card-index mono" id="study-card-index">No. 01</div>
       <div class="study-card-text" id="study-card-text"></div>
-      <div class="study-flip-hint mono">tap card to reveal · or just read it</div>
     </div>
   </div>
   <div class="study-actions">
@@ -123,11 +107,11 @@
     <p class="study-done-sub">Every card marked "Got it." Come back tomorrow for your next one.</p>
     <button class="go-btn" id="study-restart">Study again</button>
   </div>
+  <div class="study-not-gotten-panel" id="study-not-gotten-panel" hidden>
+    <div class="not-gotten-list" id="not-gotten-list"></div>
+    <button class="go-btn" id="not-gotten-back">‹ Back to studying</button>
+  </div>
 </div>
-
-<footer>
-  <span>MicroChunk — built for skimming less and understanding more.</span>
-</footer>
 
 <script src="app.js"></script>
 </body>
