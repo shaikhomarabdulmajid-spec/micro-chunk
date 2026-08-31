@@ -3,15 +3,12 @@ import re
 from collections import defaultdict
 from datetime import date
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF - aliased since the rest of the file uses fitz.*
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
 from chunker import (
-    chunk_transcript,
     chunk_sections,
     semantic_chunk_sections,
     DEFAULT_WORDS_PER_CHUNK,
@@ -32,11 +29,6 @@ MAX_PDF_BYTES = 10 * 1024 * 1024
 # (Render sleep/wake does NOT clear this - only a redeploy or crash does).
 # ---------------------------------------------------------------------------
 DAILY_MB_LIMIT = float(os.environ.get("DAILY_MB_LIMIT", 40))
-
-# YouTube jobs don't have a meaningful "file size" (a caption track is tiny
-# regardless of video length), so they're charged a small flat MB-equivalent
-# just to bound request *frequency*, not because they cost 1MB of real work.
-YOUTUBE_JOB_COST_MB = float(os.environ.get("YOUTUBE_JOB_COST_MB", 1.0))
 
 # Both chunking strategies get their own daily cap, checked independently -
 # 1 free use each per day, by default. Not tied to any paid-tier system
@@ -133,23 +125,6 @@ def _record_fixed_use(request: Request):
     record["fixed_count"] += 1
 
 
-class YouTubeRequest(BaseModel):
-    url: str
-    words_per_chunk: int = DEFAULT_WORDS_PER_CHUNK
-    strategy: str = "fixed"
-
-
-def extract_video_id(url: str) -> str:
-    patterns = [r"(?:v=|\/videos\/|embed\/|youtu\.be\/|\/v\/|\/shorts\/)([a-zA-Z0-9_-]{11})"]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", url.strip()):
-        return url.strip()
-    raise HTTPException(status_code=400, detail="Could not find a video ID in that URL.")
-
-
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -218,15 +193,36 @@ async def chunk_pdf(
         with fitz.open(stream=raw, filetype="pdf") as pdf:
             page_count = pdf.page_count
 
-            def page_blocks_iter():
+            def page_lines_iter():
                 for page in pdf:
-                    raw_blocks = page.get_text("blocks")
-                    ordered = sorted(raw_blocks, key=lambda b: (round(b[1] / 5), b[0]))
-                    yield [b[4] for b in ordered if b[6] == 0]
+                    raw = page.get_text("dict")
+                    blocks = sorted(
+                        (b for b in raw["blocks"] if b.get("type") == 0),  # 0 = text block
+                        key=lambda b: (round(b["bbox"][1] / 5), b["bbox"][0]),
+                    )
+                    page_lines = []
+                    for block in blocks:
+                        for line in block.get("lines", []):
+                            spans = line.get("spans", [])
+                            if not spans:
+                                continue
+                            text = "".join(s["text"] for s in spans).strip()
+                            if not text:
+                                continue
+                            # dominant span = the one covering the most characters,
+                            # so one bold word inside an otherwise-plain line
+                            # doesn't flip the whole line's classification
+                            dominant = max(spans, key=lambda s: len(s["text"]))
+                            page_lines.append({
+                                "text": text,
+                                "size": dominant["size"],
+                                "bold": bool(dominant["flags"] & (1 << 4)) or "bold" in dominant["font"].lower(),
+                            })
+                    yield page_lines
 
             if effective_strategy == "semantic":
                 try:
-                    chunks = semantic_chunk_sections(page_blocks_iter(), max_words=words_per_chunk)
+                    chunks = semantic_chunk_sections(page_lines_iter(), max_words=words_per_chunk)
                     used_semantic = True
                 except Exception as exc:
                     # A demo should never just break because the embedding
@@ -234,9 +230,9 @@ async def chunk_pdf(
                     # reliable structural chunker and say so honestly,
                     # rather than surfacing a raw error mid-presentation.
                     fallback_reason = f"semantic chunking failed ({exc}), used structural chunking instead"
-                    chunks = list(chunk_sections(page_blocks_iter(), words_per_chunk=words_per_chunk))
+                    chunks = list(chunk_sections(page_lines_iter(), words_per_chunk=words_per_chunk))
             else:
-                chunks = list(chunk_sections(page_blocks_iter(), words_per_chunk=words_per_chunk))
+                chunks = list(chunk_sections(page_lines_iter(), words_per_chunk=words_per_chunk))
 
             if not chunks:
                 raise HTTPException(
@@ -264,43 +260,6 @@ async def chunk_pdf(
         "requested_strategy": strategy,
         "fallback_reason": fallback_reason,
         "page_count": page_count,
-        "total_words": total_words,
-        "chunk_count": len(chunks),
-        "chunks": chunks,
-        "usage": quota,
-    }
-
-
-@app.post("/api/youtube")
-def chunk_youtube(req: YouTubeRequest, request: Request):
-    video_id = extract_video_id(req.url)
-
-    if req.strategy != "fixed":
-        raise HTTPException(
-            status_code=400,
-            detail="Only strategy='fixed' is supported for YouTube transcripts right now.",
-        )
-
-    quota = _check_and_charge(request, YOUTUBE_JOB_COST_MB)
-
-    try:
-        segments = YouTubeTranscriptApi.get_transcript(video_id)
-    except TranscriptsDisabled:
-        raise HTTPException(status_code=422, detail="Captions are disabled for this video.")
-    except NoTranscriptFound:
-        raise HTTPException(status_code=422, detail="No captions found for this video.")
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Couldn't fetch a transcript: {exc}")
-
-    if not segments:
-        raise HTTPException(status_code=422, detail="This video has an empty transcript.")
-
-    chunks = chunk_transcript(segments, words_per_chunk=req.words_per_chunk)
-    total_words = sum(c["word_count"] for c in chunks)
-
-    return {
-        "source": "youtube",
-        "video_id": video_id,
         "total_words": total_words,
         "chunk_count": len(chunks),
         "chunks": chunks,
