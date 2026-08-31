@@ -1,18 +1,3 @@
-"""
-Local, API-free text chunking.
-
-Two strategies, both sentence-boundary safe:
-  - "fixed"    : fixed word-count windows. Cheap, deterministic, streams
-                 page-by-page for large PDFs so memory stays bounded.
-  - "semantic" : groups sentences by topical similarity using a small local
-                 sentence-embedding model (all-MiniLM-L6-v2, ~90MB, runs on
-                 CPU). Better card boundaries, costs more time/RAM, and
-                 needs the whole document's sentences in memory at once -
-                 so it's opt-in, not the default for huge files.
-
-Nothing here calls out to a network AI API. The "semantic" model is
-downloaded once (on first use) and then runs entirely on your own server.
-"""
 import re
 
 _SENTENCE_SPLIT = re.compile(
@@ -32,9 +17,28 @@ def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
+def _split_oversized_sentence(sentence: str, words_per_chunk: int) -> list[str]:
+    """
+    A hard ceiling for the one case sentence-splitting can't help with: a
+    "sentence" that's actually a giant punctuation-free blob. Code-heavy
+    material (a programming guide, a page of code with sparse comments) can
+    easily run for hundreds of words with no '.', '!', or '?' at all, so
+    split_sentences() hands back the whole thing as a single "sentence" -
+    and without this, that becomes one card that runs off the bottom of
+    the screen with nothing to stop it. Only kicks in when a sentence is
+    well past the target size; ordinary prose is never touched by this.
+    """
+    words = sentence.split()
+    if len(words) <= words_per_chunk * 1.5:
+        return [sentence]
+    return [' '.join(words[i:i + words_per_chunk]) for i in range(0, len(words), words_per_chunk)]
+
+
 def chunk_text(text: str, words_per_chunk: int = DEFAULT_WORDS_PER_CHUNK) -> list[dict]:
     """Greedily pack whole sentences into fixed-size (word-count) windows."""
-    sentences = split_sentences(text)
+    sentences = []
+    for s in split_sentences(text):
+        sentences.extend(_split_oversized_sentence(s, words_per_chunk))
     chunks = []
     current: list[str] = []
     current_words = 0
@@ -172,16 +176,11 @@ def semantic_chunk_sections(
 # ---------------------------------------------------------------------------
 # Paragraph-and-heading-aware chunking for PDFs (the "fixed" strategy).
 #
-# The old version packed sentences into fixed word-count windows blindly,
-# which meant a paragraph could get sliced in half right at the window
-# boundary, and a lone chapter heading ("Chapter 3") could end up as its
-# own nearly-empty card. This version works off the PDF's own paragraph
-# structure instead (each page's text "blocks", as PyMuPDF's layout
-# analysis already detects them - this is document structure, not a
-# machine learning model):
-#   - short, unpunctuated blocks are treated as headings and folded into
-#     the paragraph that follows them, instead of becoming a standalone card
-#   - table-of-contents-style noise ("Chapter 3 ..... 45") is dropped
+# Works off the PDF's own structure instead of guessing from text shape:
+#   - a line printed in the document's largest heading-sized font becomes
+#     a section heading; everything else, however short or table-like,
+#     stays body text (see the heading-detection block above)
+#   - whole contents/index pages are dropped entirely
 #   - a full paragraph is always kept together in one card; a card only
 #     ever combines *whole* paragraphs, so nothing from paragraph A ever
 #     spills into the same card as a fragment of paragraph B's neighbor
@@ -189,79 +188,186 @@ def semantic_chunk_sections(
 #     the target card size - that gets split by sentence internally, but
 #     still never blended with a different paragraph's text
 #
-# Headings are no longer glued into card text at all (the old version did
-# "Chapter 3 Right of Way Rules. Drivers approaching..." as one sentence,
-# which read like clutter, not organization). Instead each card carries a
-# `heading` field naming the section it belongs to - the frontend uses
-# that to render section dividers with cards grouped underneath, closer to
-# how Anki/SaveMyExams organize a deck than a flat, undifferentiated list.
-# A card's section never changes mid-card: hitting a new heading always
-# closes out whatever card was being built, which is also what guarantees
-# a heading can never end up alone as its own flashcard.
+# Each card carries a `heading` field naming the section it belongs to -
+# the frontend uses that to render section dividers with cards grouped
+# underneath. A card's section never changes mid-card: hitting a new
+# heading always closes out whatever card was being built, which is also
+# what guarantees a heading can never end up alone as its own flashcard.
 # ---------------------------------------------------------------------------
 
-_TOC_NOISE = re.compile(r'\.{4,}\s*\d+\s*$')  # "Chapter 3 ..... 45"
+# ---------------------------------------------------------------------------
+# Heading detection - font-size based, not shape based.
+#
+# The old version guessed "heading" from what a line LOOKED like: short,
+# no trailing punctuation. That collides badly with real documents full of
+# short, punctuation-free lines that AREN'T headings - a demerit-points
+# table row ("Illegal parking .... 1") has exactly that shape. It also had
+# no way to tell a true chapter title apart from a minor bolded aside, so
+# it over-segmented into a new "section" every few lines, and a heading
+# guessed wrong mid-paragraph would fracture one paragraph across two
+# cards under two different headings.
+#
+# This version uses the PDF's own typography instead: PyMuPDF's "dict"
+# text extraction reports each line's font size. We find the document's
+# body-text size (the size most of the actual paragraph text is set in),
+# then find the single LARGEST font-size tier used anywhere above that -
+# that tier is treated as headings. A demerit-points row is body-sized, so
+# it can no longer be mistaken for a heading just because it's short. Any
+# smaller-but-still-bold sub-heading tier gets folded into the surrounding
+# paragraph rather than forcing a new card group - this is also what makes
+# groupings broad (dozens of cards under one heading) instead of
+# fragmenting on every visually distinct line.
+# ---------------------------------------------------------------------------
 
-# Explicit chapter/section markers - these are ALWAYS headings regardless
-# of trailing punctuation. This closes a real gap: "Chapter 3." (with a
-# period) used to fall through to the generic heuristic below, which
-# excludes anything ending in '.!?' on the assumption that's a real
-# sentence - so a heading that happened to end in a period was slipping
-# through and becoming its own flashcard. Matching the pattern explicitly
-# means punctuation can no longer hide a heading from detection.
-_EXPLICIT_HEADING = re.compile(
-    r'^(chapter|section|part|unit|module|lesson|ch\.?|sec\.?)\s*\d*[a-z]?\.?\s*:?\s*$',
-    re.IGNORECASE,
-)
+_TOC_NOISE = re.compile(r'(\.{2,}|-{2,}|_{2,})\s*\d{1,4}\s*$')  # "Chapter 3 ..... 45" / "Chapter 3 ---- 45"
 
 
-def _is_toc_noise(text: str) -> bool:
-    if _TOC_NOISE.search(text):
-        return True
-    if re.fullmatch(r'\d+', text.strip()):  # a lone page number
-        return True
-    return False
-
-
-def _is_heading_like(text: str) -> bool:
-    t = text.strip()
-    if not t:
+def _looks_like_toc_line(line: str) -> bool:
+    t = re.sub(r'\s+', ' ', line).strip()
+    if not t or len(t.split()) > 14:
         return False
-    if _EXPLICIT_HEADING.match(t):
+    if t[-1] in '.!?"\u201d\u2019\')':
+        return False
+    if _TOC_NOISE.search(t):
         return True
-    words = t.split()
-    if len(words) > 8:
-        return False
-    if t[-1] in '.!?':  # ends like a normal sentence, not a heading
-        return False
-    return True
+    return bool(re.search(r'(?<![.\d])\d{1,4}$', t))
 
 
-def extract_sections(pages_blocks):
+def _is_toc_page(lines: list) -> bool:
     """
-    Consume an iterator that yields, per page, a list of that page's text
-    blocks in reading order. Yields {"heading": str|None, "text": str} for
-    every real paragraph, in document order - heading blocks are folded
-    into `heading` rather than yielded as their own entry, and
-    table-of-contents noise is dropped entirely. Consecutive heading-like
-    blocks (e.g. a "Chapter 3" line immediately followed by a "Right of Way
-    Rules" title line) are merged into a single combined heading rather
-    than the second one silently overwriting the first.
+    A whole PAGE is a contents/index listing if most of its lines read like
+    contents rows - dropped entirely rather than becoming cards. Scoped to
+    the whole page (not individual lines) deliberately: a demerit-points
+    table row has the exact same "<description> <number>" shape as a
+    contents row, so checking stray lines anywhere in the document would
+    silently delete real table content. A real contents page, by contrast,
+    is mostly nothing BUT that shape, page after page - that's the signal.
     """
+    texts = [l["text"].strip() for l in lines if l["text"].strip()]
+    if len(texts) < 3:
+        return False
+    toc_like = sum(1 for t in texts if _looks_like_toc_line(t))
+    return toc_like / len(texts) >= 0.5
+
+
+def _compute_body_size(pages: list) -> float:
+    """
+    The font size most of the document's actual prose is set in, found by
+    weighting each distinct size by how many characters appear at that
+    size (so one page of a big pull-quote can't outvote 300 pages of body
+    text). Short lines are excluded from the vote since headings and table
+    rows are usually short and would otherwise skew it.
+    """
+    votes: dict = {}
+    for lines in pages:
+        for line in lines:
+            t = line["text"].strip()
+            if len(t.split()) < 6:
+                continue
+            size = round(line["size"], 1)
+            votes[size] = votes.get(size, 0) + len(t)
+    if not votes:
+        return 11.0
+    return max(votes, key=votes.get)
+
+
+def _compute_heading_threshold(pages: list, body_size: float):
+    """
+    The single largest font-size tier found above body size, or None if
+    the document has no real size variation to work with. Deliberately
+    picks only the TOP tier (not every size bigger than body text) so a
+    document with both chapter titles and smaller bolded sub-headings
+    treats only the chapter titles as section breaks - broader groupings,
+    on purpose.
+    """
+    tiers = set()
+    for lines in pages:
+        for line in lines:
+            size = round(line["size"], 1)
+            if size > body_size * 1.12:
+                tiers.add(size)
+    if not tiers:
+        return None
+    return max(tiers) - 0.05
+
+
+def _is_heading_line(line: dict, body_size: float, heading_threshold) -> bool:
+    """
+    A line counts as a heading if EITHER signal fires:
+      - it's in the document's top font-size tier (the primary signal,
+        strongest when a document actually varies its heading size), or
+      - it's bold, no smaller than body text, and short - this is what
+        catches documents (a lot of technical/code-heavy guides included)
+        that style headings as bold-but-same-size rather than bigger.
+    Without the second branch, a document with zero size variation
+    between headings and body falls back to ZERO headings found -
+    everything lands in one giant undivided section, which is exactly the
+    "grouped ALL flashcards under ONE heading" failure. Table rows and
+    demerit-point-style content are excluded from this safely: that kind
+    of tabular content is essentially never bold in real documents, only
+    the row label conventions (short, ends in a number) that used to
+    trip up the old shape-only detector.
+    """
+    t = line["text"].strip()
+    if not t or len(t.split()) > 20:  # a giant blob at heading size/weight is a pull-quote, not a title
+        return False
+    size = round(line["size"], 1)
+    if heading_threshold is not None and size >= heading_threshold:
+        return True
+    return bool(line.get("bold")) and size >= body_size - 0.1 and len(t.split()) <= 12
+
+
+def extract_sections(pages_lines):
+    """
+    Consume an iterable that yields, per page, a list of that page's text
+    lines in reading order as {"text": str, "size": float, "bold": bool}
+    dicts (see main.py's page_lines_iter). Yields {"heading": str|None,
+    "text": str} for every real paragraph, in document order. Consecutive
+    heading-sized lines (e.g. a "DEMERIT POINTS" line immediately followed
+    by a "For Moving Violations" subtitle line, both in the same large
+    size) are merged into one combined heading rather than the second
+    silently overwriting the first.
+
+    Needs the whole document's lines up front, not just one page at a
+    time, to work out what "body text size" and "heading size" even mean
+    for THIS specific PDF - a deliberate tradeoff, and a real one: this is
+    no longer a page-by-page streaming pass. But font metadata for even a
+    900-page book is a few MB at most, nothing like the cost of holding
+    page images, so it's a fine trade for actually getting groupings right.
+    """
+    pages = [p for p in pages_lines if not _is_toc_page(p)]
+    body_size = _compute_body_size(pages)
+    heading_threshold = _compute_heading_threshold(pages, body_size)
+
     current_heading = None
     pending_heading_parts: list[str] = []
+    para_buf: list[str] = []
 
-    for page_blocks in pages_blocks:
-        for raw in page_blocks:
-            text = re.sub(r'\s+', ' ', raw).strip()
-            if not text or _is_toc_noise(text):
+    def close_heading():
+        nonlocal pending_heading_parts, current_heading
+        if pending_heading_parts:
+            current_heading = ' — '.join(p.rstrip('.') for p in pending_heading_parts)
+            pending_heading_parts = []
+
+    for page in pages:
+        for line in page:
+            t = line["text"].strip()
+            if not t:
                 continue
-            if _is_heading_like(text):
-                pending_heading_parts.append(text)
+            if _is_heading_line(line, body_size, heading_threshold):
+                if para_buf:
+                    text = ' '.join(para_buf).strip()
+                    para_buf = []
+                    if text:
+                        yield {"heading": current_heading, "text": text}
+                pending_heading_parts.append(t)
                 continue
-            if pending_heading_parts:
-                current_heading = ' — '.join(p.rstrip('.') for p in pending_heading_parts)
-                pending_heading_parts = []
+            close_heading()
+            para_buf.append(t)
+    close_heading()
+    if para_buf:
+        text = ' '.join(para_buf).strip()
+        if text:
             yield {"heading": current_heading, "text": text}
 
 
