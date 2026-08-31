@@ -2,17 +2,10 @@
 const API_BASE_URL = "http://localhost:8000";
 
 const els = {
-  tabs: document.querySelectorAll(".tab"),
-  panels: {
-    pdf: document.getElementById("panel-pdf"),
-    youtube: document.getElementById("panel-youtube"),
-  },
   dropzone: document.getElementById("dropzone"),
   dzTitle: document.getElementById("dz-title"),
   pdfInput: document.getElementById("pdf-input"),
-  pdfStartBtn: document.getElementById("pdf-start-btn"),
-  ytInput: document.getElementById("yt-input"),
-  ytSubmit: document.getElementById("yt-submit"),
+  pdfStartBtn: document.getElementById("pdf-start-chunking-btn"),
   wordsRange: document.getElementById("words-per-chunk"),
   wordsVal: document.getElementById("words-per-chunk-val"),
   strategySelect: document.getElementById("strategy-select"),
@@ -33,6 +26,11 @@ const els = {
   usageBadge: document.getElementById("usage-badge"),
   studyOverlay: document.getElementById("study-overlay"),
   studyExit: document.getElementById("study-exit"),
+  notGottenTab: document.getElementById("study-not-gotten-tab"),
+  notGottenCount: document.getElementById("not-gotten-count"),
+  notGottenPanel: document.getElementById("study-not-gotten-panel"),
+  notGottenList: document.getElementById("not-gotten-list"),
+  notGottenBack: document.getElementById("not-gotten-back"),
   studyProgressFill: document.getElementById("study-progress-fill"),
   studyCount: document.getElementById("study-count"),
   studyCard: document.getElementById("study-card"),
@@ -46,45 +44,21 @@ const els = {
   studyStage: document.querySelector(".study-stage"),
 };
 
-let activeTab = "pdf";
 let currentDeck = null;
 let isProcessing = false;
 let selectedPdfFile = null;
 
-// setProcessing locks tab switching + the slider + both intake controls for
-// the whole duration of a job - this is what fixes "switching tabs mid-job
-// looked like it reset everything." Disabled buttons don't fire click
-// events at all, so this isn't just a visual state.
+// setProcessing locks the dropzone + slider + strategy select for the
+// whole duration of a job - disabled controls don't fire click events at
+// all, so this isn't just a visual state.
 function setProcessing(state) {
   isProcessing = state;
-  els.tabs.forEach(t => (t.disabled = state));
   els.dropzone.classList.toggle("locked", state);
   els.pdfInput.disabled = state;
   els.pdfStartBtn.disabled = state;
-  els.ytInput.disabled = state;
-  els.ytSubmit.disabled = state;
   els.wordsRange.disabled = state;
-  els.strategySelect.disabled = state || activeTab === "youtube";
+  els.strategySelect.disabled = state;
 }
-
-// ---------- Tabs ----------
-els.tabs.forEach(tab => {
-  tab.addEventListener("click", () => {
-    activeTab = tab.dataset.tab;
-    els.tabs.forEach(t => t.classList.toggle("active", t === tab));
-    Object.entries(els.panels).forEach(([key, panel]) =>
-      panel.classList.toggle("active", key === activeTab)
-    );
-    if (activeTab === "youtube") {
-      els.strategySelect.value = "fixed";
-      els.strategySelect.disabled = true;
-    } else {
-      els.strategySelect.disabled = false;
-    }
-    setStatus("");
-    hideProgress();
-  });
-});
 
 els.wordsRange.addEventListener("input", () => {
   els.wordsVal.textContent = els.wordsRange.value;
@@ -135,9 +109,14 @@ function daysBetween(a, b) {
   return Math.round((new Date(b) - new Date(a)) / dayMs);
 }
 
-function renderStreak(streak) {
+function renderStreak(streak, { justUpdated = false } = {}) {
   els.streakCount.textContent = streak;
   els.streakBadge.classList.toggle("lit", streak >= 1);
+  if (justUpdated) {
+    els.streakBadge.classList.remove("pulse");
+    void els.streakBadge.offsetWidth; // reflow so the animation can retrigger
+    els.streakBadge.classList.add("pulse");
+  }
 }
 
 function updateStreakForVisit() {
@@ -157,7 +136,7 @@ function updateStreakForVisit() {
 
   localStorage.setItem("microchunk_last_active", today);
   localStorage.setItem("microchunk_streak", String(streak));
-  renderStreak(streak);
+  renderStreak(streak, { justUpdated: true });
 }
 
 // ---------- Usage badge (MB-based, not a job count) ----------
@@ -266,48 +245,6 @@ async function startPdfJob(file) {
   }
 }
 
-// ---------- YouTube intake ----------
-els.ytSubmit.addEventListener("click", handleYoutube);
-els.ytInput.addEventListener("keydown", e => {
-  if (e.key === "Enter") handleYoutube();
-});
-
-async function handleYoutube() {
-  const url = els.ytInput.value.trim();
-  if (!url) {
-    setStatus("Paste a YouTube URL first.", "error");
-    return;
-  }
-  setStatus("Fetching captions and chunking …", "busy");
-  setProcessing(true);
-
-  try {
-    const wordsPerChunk = Number(els.wordsRange.value);
-    const res = await fetch(`${API_BASE_URL}/api/youtube`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, words_per_chunk: wordsPerChunk, strategy: "fixed" }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Something went wrong.");
-
-    applyUsage(data.usage);
-    const deckTitle = `youtu.be/${data.video_id}`;
-    const deckMeta = `${data.total_words.toLocaleString()} words · ${data.chunk_count} cards`;
-    const deckId = saveDeck(data, deckTitle, deckMeta);
-    renderDeck(data, { title: deckTitle, meta: deckMeta, deckId });
-    renderDeckList();
-    setStatus(`Done — ${data.chunk_count} cards ready below.`);
-  } catch (err) {
-    setStatus(err.message, "error");
-    if (err.message && err.message.toLowerCase().includes("daily free limit")) {
-      refreshUsageBadge();
-    }
-  } finally {
-    setProcessing(false);
-  }
-}
-
 // ---------- Rendering ----------
 function renderDeck(data, { title, meta, deckId }) {
   els.deckTitle.textContent = title;
@@ -326,8 +263,8 @@ function renderDeck(data, { title, meta, deckId }) {
   // Group consecutive cards sharing a heading into one topic - chunks
   // already arrive in document order with the same heading for everything
   // in one section, so a simple consecutive-run grouping is enough. Cards
-  // with no heading (YouTube, or content before the first detected
-  // heading) fall into a single "General" topic.
+  // with no heading (content before the first detected heading) fall
+  // into a single "General" topic.
   const sections = [];
   data.chunks.forEach(chunk => {
     const heading = chunk.heading || null;
@@ -385,6 +322,7 @@ function renderDeck(data, { title, meta, deckId }) {
     section.cards.forEach(chunk => {
       const card = document.createElement("article");
       card.className = "card";
+      card.dataset.no = String(chunk.index + 1).padStart(3, "0");
       card.style.animationDelay = `${Math.min(chunk.index * 18, 300)}ms`;
 
       const text = document.createElement("div");
@@ -398,15 +336,6 @@ function renderDeck(data, { title, meta, deckId }) {
       const wc = document.createElement("span");
       wc.textContent = `${chunk.word_count} words`;
       foot.appendChild(wc);
-
-      if (data.source === "youtube") {
-        const link = document.createElement("a");
-        link.href = `https://youtu.be/${data.video_id}?t=${Math.floor(chunk.start_time)}`;
-        link.target = "_blank";
-        link.rel = "noopener";
-        link.textContent = formatTimestamp(chunk.start_time);
-        foot.appendChild(link);
-      }
 
       card.appendChild(foot);
       track.appendChild(card);
@@ -442,12 +371,6 @@ function setTopicExpanded(topicId, expanded) {
 
 function expandTopic(topicId) {
   setTopicExpanded(topicId, true);
-}
-
-function formatTimestamp(seconds) {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60).toString().padStart(2, "0");
-  return `${m}:${s}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -647,23 +570,37 @@ function openSavedDeck(deck) {
 let studyQueue = [];
 let studyTotal = 0;
 let studyDeckId = null;
+let studyBusy = false; // guards against a fast double-click grading two cards at once
+let notGotten = new Map(); // index -> card, cards currently graded "Review again" this session
 
 els.studyBtn.addEventListener("click", () => {
   if (!currentDeck || !currentDeck.chunks || currentDeck.chunks.length === 0) return;
-  studyDeckId = currentDeck.deckId;
 
-  const dueCards = currentDeck.chunks.filter(c => isCardDue(studyDeckId, c.index));
-  if (dueCards.length === 0) {
-    setStatus("Nothing due for review in this deck today - come back tomorrow!", "");
-    return;
+  // If you hit Exit mid-deck and come right back, pick up exactly where you
+  // left off instead of silently discarding your progress and recomputing
+  // a fresh due-list from scratch (which reset the counter back to 0 even
+  // though you hadn't actually lost any graded cards).
+  const resuming = studyDeckId === currentDeck.deckId && studyQueue.length > 0;
+
+  if (!resuming) {
+    studyDeckId = currentDeck.deckId;
+    const dueCards = currentDeck.chunks.filter(c => isCardDue(studyDeckId, c.index));
+    if (dueCards.length === 0) {
+      setStatus("Nothing due for review in this deck today - come back tomorrow!", "");
+      return;
+    }
+    studyQueue = dueCards.map(c => ({ index: c.index, text: c.text }));
+    studyTotal = studyQueue.length;
+    notGotten = new Map();
   }
 
-  studyQueue = dueCards.map(c => ({ index: c.index, text: c.text }));
-  studyTotal = studyQueue.length;
+  studyBusy = false;
   els.studyOverlay.hidden = false;
   els.studyDone.hidden = true;
   els.studyStage.hidden = false;
   els.studyActions.hidden = false;
+  els.notGottenPanel.hidden = true;
+  renderNotGottenTab();
   showNextStudyCard();
 });
 
@@ -673,11 +610,36 @@ els.studyExit.addEventListener("click", () => {
 });
 els.studyRestart.addEventListener("click", () => els.studyBtn.click());
 
+function renderNotGottenTab() {
+  els.notGottenCount.textContent = notGotten.size;
+  els.notGottenTab.hidden = notGotten.size === 0;
+}
+
+els.notGottenTab.addEventListener("click", () => {
+  els.notGottenList.innerHTML = "";
+  for (const card of notGotten.values()) {
+    const item = document.createElement("div");
+    item.className = "not-gotten-item";
+    item.innerHTML = `<span class="mono not-gotten-no">No. ${String(card.index + 1).padStart(2, "0")}</span><span>${escapeHtml(card.text)}</span>`;
+    els.notGottenList.appendChild(item);
+  }
+  els.studyStage.hidden = true;
+  els.studyActions.hidden = true;
+  els.notGottenPanel.hidden = false;
+});
+
+els.notGottenBack.addEventListener("click", () => {
+  els.notGottenPanel.hidden = true;
+  els.studyStage.hidden = false;
+  els.studyActions.hidden = false;
+});
+
 function showNextStudyCard() {
   if (studyQueue.length === 0) {
     els.studyStage.hidden = true;
     els.studyActions.hidden = true;
     els.studyDone.hidden = false;
+    burstConfetti();
     renderDeckList();
     return;
   }
@@ -690,18 +652,61 @@ function showNextStudyCard() {
   els.studyProgressFill.style.width = `${(doneSoFar / studyTotal) * 100}%`;
 }
 
-els.studyBtnKnown.addEventListener("click", () => {
-  const card = studyQueue.shift();
-  updateCardSRS(studyDeckId, card.index, 4);
-  showNextStudyCard();
-});
+// Grading is guarded two ways: `studyBusy` ignores a second click that
+// lands while the first is still being processed (the actual fix for
+// "pressing Got it very fast makes the button disappear" - a fast
+// double-click was registering as two separate grades, which could burn
+// through the last two cards on one tap and jump straight to the done
+// screen), and the `if (!card) return` is a hard backstop so an edge case
+// can never throw on `card.index` and silently abort mid-handler.
+function gradeCard(quality) {
+  if (studyBusy || studyQueue.length === 0) return;
+  studyBusy = true;
 
-els.studyBtnReview.addEventListener("click", () => {
   const card = studyQueue.shift();
-  updateCardSRS(studyDeckId, card.index, 2); // schedules it for tomorrow...
-  studyQueue.push(card); // ...but still lets you retry it right now, this session
+  if (!card) { studyBusy = false; return; }
+
+  updateCardSRS(studyDeckId, card.index, quality);
+  if (quality < 3) {
+    studyQueue.push(card); // "Review again" - retry later this session
+    notGotten.set(card.index, card);
+  } else {
+    notGotten.delete(card.index); // got it this time - clear it off the missed list
+    burstConfetti(18); // smaller than the deck-cleared celebration, still falls from the top
+  }
+  renderNotGottenTab();
+
   showNextStudyCard();
-});
+  requestAnimationFrame(() => { studyBusy = false; });
+}
+
+els.studyBtnKnown.addEventListener("click", () => gradeCard(4));
+els.studyBtnReview.addEventListener("click", () => gradeCard(2));
+
+// Tiny CSS-only confetti burst for "deck cleared" - no library, no images,
+// and it inherits the global prefers-reduced-motion override at the top
+// of style.css automatically since it's just a CSS animation.
+function burstConfetti(count = 40) {
+  const colors = ["#FFD23F", "#2A6F72", "#B5482A", "#211F1B"];
+  const container = document.createElement("div");
+  container.className = "confetti-burst";
+  for (let i = 0; i < count; i++) {
+    const piece = document.createElement("span");
+    piece.style.setProperty("--startX", `${Math.random() * 100}vw`);
+    piece.style.setProperty("--drift", `${(Math.random() - 0.5) * 200}px`);
+    piece.style.setProperty("--rot", `${(Math.random() - 0.5) * 900}deg`);
+    piece.style.setProperty("--delay", `${Math.random() * 400}ms`);
+    piece.style.setProperty("--duration", `${1.1 + Math.random() * 0.9}s`);
+    piece.style.background = colors[i % colors.length];
+    container.appendChild(piece);
+  }
+  document.body.appendChild(container);
+  setTimeout(() => container.remove(), 2400);
+}
+
+function escapeHtml(str) {
+  return str.replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
 
 // ---------- Init ----------
 updateStreakForVisit();
