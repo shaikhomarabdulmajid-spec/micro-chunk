@@ -1,5 +1,4 @@
-// Point this at wherever you deploy the FastAPI backend (e.g. Render).
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = "https://micro-chunk.onrender.com";
 
 const els = {
   dropzone: document.getElementById("dropzone"),
@@ -92,18 +91,6 @@ function hideProgress() {
   els.progressTrack.classList.remove("indeterminate");
 }
 
-// ---------------------------------------------------------------------------
-// Streak - saved in THIS BROWSER's localStorage only, under
-// "microchunk_streak" / "microchunk_last_active". Not sent to the backend,
-// not tied to an account - a different browser/device or clearing site
-// data starts it fresh.
-//
-// Purely visit-based: the very first time you ever open the app, the
-// streak shows 0. The NEXT calendar day you open it, it becomes 1. The
-// day after that, 2, and so on. If you skip a day, it drops back to 0 on
-// your next visit (treated like a fresh start, not an instant 1) - so the
-// badge always means "consecutive days in a row," never a lie.
-// ---------------------------------------------------------------------------
 function daysBetween(a, b) {
   const dayMs = 24 * 60 * 60 * 1000;
   return Math.round((new Date(b) - new Date(a)) / dayMs);
@@ -139,7 +126,7 @@ function updateStreakForVisit() {
   renderStreak(streak, { justUpdated: true });
 }
 
-// ---------- Usage badge (MB-based, not a job count) ----------
+
 const DEFAULT_DAILY_MB_LIMIT = 40; // must match the backend's DAILY_MB_LIMIT default
 const DEFAULT_SEMANTIC_LIMIT = 1; // must match the backend's SEMANTIC_DAILY_LIMIT default
 
